@@ -53,6 +53,15 @@ defmodule YtDlp do
 
       {:ok, result} = YtDlp.download_sync("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
       IO.puts("Downloaded to: \#{result.path}")
+
+  ### Download with real-time progress tracking
+
+      {:ok, download_id} = YtDlp.download(
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        progress_callback: fn progress ->
+          IO.write("\\rProgress: \#{progress.percent}% at \#{progress.speed}")
+        end
+      )
   """
 
   alias YtDlp.Downloader
@@ -62,7 +71,7 @@ defmodule YtDlp do
   @type download_info :: Downloader.download_info()
 
   @doc """
-  Downloads a video asynchronously.
+  Downloads a video asynchronously with real-time progress tracking.
 
   Returns immediately with a download ID that can be used to track the
   download status.
@@ -75,6 +84,7 @@ defmodule YtDlp do
       * `:output_dir` - Directory to save the video
       * `:filename_template` - Output filename template
       * `:timeout` - Download timeout in milliseconds
+      * `:progress_callback` - Function called with progress updates
 
   ## Returns
 
@@ -83,12 +93,22 @@ defmodule YtDlp do
 
   ## Examples
 
+      # Basic download
       {:ok, download_id} = YtDlp.download("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
+      # With custom format and directory
       {:ok, download_id} = YtDlp.download(
         "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         format: "bestvideo+bestaudio",
         output_dir: "/tmp/videos"
+      )
+
+      # With progress tracking
+      {:ok, download_id} = YtDlp.download(
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        progress_callback: fn progress ->
+          IO.write("\\r#{progress.percent}% - #{progress.speed} - ETA: #{progress.eta}")
+        end
       )
   """
   @spec download(String.t(), keyword()) :: {:ok, download_id()} | {:error, String.t()}

@@ -6,11 +6,13 @@ An Elixir wrapper for [yt-dlp](https://github.com/yt-dlp/yt-dlp) with GenServer-
 
 - 🚀 **Asynchronous Downloads**: Non-blocking video downloads with status tracking
 - 🔄 **Concurrent Management**: Control multiple simultaneous downloads
-- 📊 **Progress Tracking**: Monitor download status in real-time
+- 📊 **Real-Time Progress Tracking**: Streaming progress updates via Elixir Ports (%, speed, ETA)
+- ✅ **Cancellation Support**: Cancel active downloads mid-download
 - 🎯 **Simple API**: Clean, idiomatic Elixir interface
 - 🛡️ **Supervised**: Built with OTP supervision for reliability
 - 📦 **NixOS Ready**: Designed to work seamlessly with Nix flakes
 - 🔍 **Metadata Extraction**: Get video info without downloading
+- 🔌 **Port-Based Communication**: Uses Elixir Ports for streaming yt-dlp output
 
 ## Installation
 
@@ -65,6 +67,50 @@ end
 # Download and wait for completion
 {:ok, result} = YtDlp.download_sync("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 IO.puts("Downloaded to: #{result.path}")
+```
+
+### Real-Time Progress Tracking
+
+```elixir
+# Download with live progress updates
+{:ok, download_id} = YtDlp.download(
+  "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  progress_callback: fn progress ->
+    IO.write("\rDownloading: #{progress.percent}% of #{progress.total_size} at #{progress.speed} - ETA: #{progress.eta}")
+  end
+)
+
+# Or check progress periodically
+{:ok, download_id} = YtDlp.download("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+Task.start(fn ->
+  monitor_progress(download_id)
+end)
+
+defp monitor_progress(download_id) do
+  {:ok, status} = YtDlp.get_status(download_id)
+
+  if status.progress do
+    IO.puts("Progress: #{status.progress.percent}% - #{status.progress.speed}")
+  end
+
+  case status.status do
+    :completed -> IO.puts("\n✓ Download complete!")
+    :failed -> IO.puts("\n✗ Download failed: #{status.error}")
+    _ ->
+      Process.sleep(1000)
+      monitor_progress(download_id)
+  end
+end
+```
+
+### Cancel Active Download
+
+```elixir
+{:ok, download_id} = YtDlp.download("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+# Cancel it (even if actively downloading)
+:ok = YtDlp.cancel(download_id)
 ```
 
 ### Custom Download Options
@@ -144,7 +190,7 @@ export YT_DLP_PATH=/custom/path/to/yt-dlp
 
 ## Architecture
 
-The library uses Elixir's OTP principles for reliability:
+The library uses Elixir's OTP principles with Port-based communication for reliability and real-time updates:
 
 ```
 YtDlp.Application (Supervisor)
@@ -152,18 +198,44 @@ YtDlp.Application (Supervisor)
     └─→ YtDlp.Downloader (GenServer)
             │
             ├─→ Manages download queue
-            ├─→ Tracks download status
+            ├─→ Tracks download status & progress
+            ├─→ Stores Port PIDs for cancellation
             └─→ Spawns download tasks
                     │
                     └─→ YtDlp.Command (yt-dlp wrapper)
+                            │
+                            └─→ YtDlp.Port (GenServer)
+                                    │
+                                    └─→ Port (yt-dlp process)
+                                            ├─→ Streams progress output
+                                            ├─→ Can be killed for cancellation
+                                            └─→ Returns file path on completion
 ```
 
 ### Components
 
 - **YtDlp**: Public API module - Main interface for users
 - **YtDlp.Application**: OTP Application with supervision tree
-- **YtDlp.Downloader**: GenServer managing download lifecycle and concurrency
+- **YtDlp.Downloader**: GenServer managing download lifecycle, concurrency, and progress
 - **YtDlp.Command**: Low-level module for executing yt-dlp commands
+- **YtDlp.Port**: GenServer for Port communication with streaming output parsing
+
+### File Path for Waffle/S3 Integration
+
+When a download completes, the result contains the absolute file path:
+
+```elixir
+{:ok, result} = YtDlp.download_sync("https://example.com/video")
+# result = %{path: "/absolute/path/to/video.mp4", url: "https://example.com/video"}
+
+# Perfect for uploading with Waffle:
+MyApp.VideoUploader.store({result.path, scope})
+```
+
+The file path is guaranteed to:
+- Be an absolute path
+- Exist on disk when status is `:completed`
+- Be verified before returning
 
 ## Development
 

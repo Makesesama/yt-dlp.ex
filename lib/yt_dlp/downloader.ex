@@ -41,12 +41,14 @@ defmodule YtDlp.Downloader do
           status: download_status(),
           result: map() | nil,
           error: String.t() | nil,
+          progress: map() | nil,
           started_at: DateTime.t() | nil,
           completed_at: DateTime.t() | nil
         }
 
   @type state :: %{
           downloads: %{download_id() => download_info()},
+          port_pids: %{download_id() => pid()},
           max_concurrent: pos_integer(),
           active_downloads: non_neg_integer(),
           output_dir: String.t()
@@ -121,7 +123,7 @@ defmodule YtDlp.Downloader do
   @doc """
   Cancels a pending or downloading video.
 
-  Note: Currently, active downloads cannot be cancelled mid-download.
+  This will stop the yt-dlp process if it's currently downloading.
 
   ## Returns
 
@@ -159,6 +161,7 @@ defmodule YtDlp.Downloader do
 
     state = %{
       downloads: %{},
+      port_pids: %{},
       max_concurrent: max_concurrent,
       active_downloads: 0,
       output_dir: output_dir
@@ -180,6 +183,7 @@ defmodule YtDlp.Downloader do
       opts: opts,
       result: nil,
       error: nil,
+      progress: nil,
       started_at: nil,
       completed_at: nil
     }
@@ -196,8 +200,8 @@ defmodule YtDlp.Downloader do
   def handle_call({:get_status, download_id}, _from, state) do
     case Map.fetch(state.downloads, download_id) do
       {:ok, download_info} ->
-        # Remove internal opts from the response
-        clean_info = Map.drop(download_info, [:opts])
+        # Remove internal opts and port_pid from the response
+        clean_info = Map.drop(download_info, [:opts, :port_pid])
         {:reply, {:ok, clean_info}, state}
 
       :error ->
@@ -210,7 +214,7 @@ defmodule YtDlp.Downloader do
     downloads =
       state.downloads
       |> Map.values()
-      |> Enum.map(&Map.drop(&1, [:opts]))
+      |> Enum.map(&Map.drop(&1, [:opts, :port_pid]))
       |> Enum.sort_by(& &1.started_at, {:desc, DateTime})
 
     {:reply, downloads, state}
@@ -224,7 +228,27 @@ defmodule YtDlp.Downloader do
         {:reply, :ok, %{state | downloads: new_downloads}}
 
       {:ok, %{status: :downloading}} ->
-        {:reply, {:error, "Cannot cancel active download"}, state}
+        # Actually cancel the active download using the port PID
+        case Map.fetch(state.port_pids, download_id) do
+          {:ok, port_pid} ->
+            Command.cancel_download(port_pid)
+
+            new_state =
+              state
+              |> update_download(download_id, %{
+                status: :failed,
+                error: "Download cancelled by user",
+                completed_at: DateTime.utc_now()
+              })
+              |> Map.update!(:port_pids, &Map.delete(&1, download_id))
+              |> Map.update!(:active_downloads, &max(&1 - 1, 0))
+              |> maybe_start_next_download()
+
+            {:reply, :ok, new_state}
+
+          :error ->
+            {:reply, {:error, "Port PID not found for active download"}, state}
+        end
 
       {:ok, %{status: status}} ->
         {:reply, {:error, "Download already #{status}"}, state}
@@ -256,8 +280,11 @@ defmodule YtDlp.Downloader do
           |> put_in([:downloads, download_id], updated_info)
           |> Map.update!(:active_downloads, &(&1 + 1))
 
-        # Start async download task
-        Task.start(fn -> do_download(self(), download_id, download_info) end)
+        # Start async download with port
+        {:ok, port_pid} = do_download(self(), download_id, download_info, state.output_dir)
+
+        # Store port PID for cancellation
+        new_state = put_in(new_state.port_pids[download_id], port_pid)
 
         {:noreply, new_state}
 
@@ -267,36 +294,70 @@ defmodule YtDlp.Downloader do
   end
 
   @impl true
-  def handle_info({:download_complete, download_id, result}, state) do
-    Logger.info("Download #{download_id} completed successfully")
+  def handle_info({:download_result, _url, {:ok, result}}, state) do
+    # Find the download by URL since that's what we get back
+    download_id =
+      state.downloads
+      |> Enum.find(fn {_id, info} -> info.url == result.url end)
+      |> case do
+        {id, _} -> id
+        nil -> nil
+      end
 
-    new_state =
-      state
-      |> update_download(download_id, %{
-        status: :completed,
-        result: result,
-        completed_at: DateTime.utc_now()
-      })
-      |> Map.update!(:active_downloads, &max(&1 - 1, 0))
-      |> maybe_start_next_download()
+    if download_id do
+      Logger.info("Download #{download_id} completed successfully")
 
-    {:noreply, new_state}
+      new_state =
+        state
+        |> update_download(download_id, %{
+          status: :completed,
+          result: result,
+          completed_at: DateTime.utc_now()
+        })
+        |> Map.update!(:port_pids, &Map.delete(&1, download_id))
+        |> Map.update!(:active_downloads, &max(&1 - 1, 0))
+        |> maybe_start_next_download()
+
+      {:noreply, new_state}
+    else
+      {:noreply, state}
+    end
   end
 
   @impl true
-  def handle_info({:download_failed, download_id, error}, state) do
-    Logger.error("Download #{download_id} failed: #{error}")
+  def handle_info({:download_result, url, {:error, error}}, state) do
+    # Find the download by URL
+    download_id =
+      state.downloads
+      |> Enum.find(fn {_id, info} -> info.url == url end)
+      |> case do
+        {id, _} -> id
+        nil -> nil
+      end
 
-    new_state =
-      state
-      |> update_download(download_id, %{
-        status: :failed,
-        error: error,
-        completed_at: DateTime.utc_now()
-      })
-      |> Map.update!(:active_downloads, &max(&1 - 1, 0))
-      |> maybe_start_next_download()
+    if download_id do
+      Logger.error("Download #{download_id} failed: #{error}")
 
+      new_state =
+        state
+        |> update_download(download_id, %{
+          status: :failed,
+          error: error,
+          completed_at: DateTime.utc_now()
+        })
+        |> Map.update!(:port_pids, &Map.delete(&1, download_id))
+        |> Map.update!(:active_downloads, &max(&1 - 1, 0))
+        |> maybe_start_next_download()
+
+      {:noreply, new_state}
+    else
+      {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_info({:download_progress, download_id, progress}, state) do
+    new_state = update_download(state, download_id, %{progress: progress})
     {:noreply, new_state}
   end
 
@@ -341,22 +402,33 @@ defmodule YtDlp.Downloader do
     end
   end
 
-  defp do_download(server_pid, download_id, download_info) do
+  defp do_download(server_pid, download_id, download_info, default_output_dir) do
     %{url: url, opts: opts} = download_info
 
     # Get output directory from opts or use default
-    output_dir = Keyword.get(opts, :output_dir, "./downloads")
+    output_dir = Keyword.get(opts, :output_dir, default_output_dir)
 
-    # Perform the download
-    result = Command.download(url, output_dir, opts)
+    # Wrap progress callback to send updates to GenServer
+    progress_callback =
+      case Keyword.get(opts, :progress_callback) do
+        nil ->
+          fn progress ->
+            send(server_pid, {:download_progress, download_id, progress})
+          end
 
-    # Send result back to GenServer
-    case result do
-      {:ok, data} ->
-        send(server_pid, {:download_complete, download_id, data})
+        user_callback ->
+          fn progress ->
+            # Send to GenServer
+            send(server_pid, {:download_progress, download_id, progress})
+            # Also call user callback
+            user_callback.(progress)
+          end
+      end
 
-      {:error, reason} ->
-        send(server_pid, {:download_failed, download_id, reason})
-    end
+    # Merge progress callback into opts
+    opts_with_progress = Keyword.put(opts, :progress_callback, progress_callback)
+
+    # Start async download (returns port PID)
+    Command.download_async(url, output_dir, opts_with_progress, server_pid)
   end
 end
