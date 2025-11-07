@@ -25,9 +25,19 @@ defmodule YtDlp.MixProject do
 
   defp deps do
     [
+      # Core dependencies
       {:jason, "~> 1.4"},
+
+      # Development and testing
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+
+      # Optional: Membrane Framework for advanced video processing
+      # Uncomment these if you want to use YtDlp.Membrane module:
+      # {:membrane_core, "~> 1.0"},
+      # {:membrane_file_plugin, "~> 0.17.0"},
+      # {:membrane_ffmpeg_swresample_plugin, "~> 0.20.0"},
+      # {:membrane_mp4_plugin, "~> 0.35.0"}
     ]
   end
 

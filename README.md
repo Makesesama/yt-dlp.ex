@@ -8,6 +8,8 @@ An Elixir wrapper for [yt-dlp](https://github.com/yt-dlp/yt-dlp) with GenServer-
 - 🔄 **Concurrent Management**: Control multiple simultaneous downloads
 - 📊 **Real-Time Progress Tracking**: Streaming progress updates via Elixir Ports (%, speed, ETA)
 - ✅ **Cancellation Support**: Cancel active downloads mid-download
+- 🎬 **FFmpeg Integration**: Extract audio, merge streams, generate thumbnails, embed subtitles
+- 🎞️ **Membrane Support**: Advanced video processing with Elixir Membrane framework (optional)
 - 🎯 **Simple API**: Clean, idiomatic Elixir interface
 - 🛡️ **Supervised**: Built with OTP supervision for reliability
 - 📦 **NixOS Ready**: Designed to work seamlessly with Nix flakes
@@ -111,6 +113,81 @@ end
 
 # Cancel it (even if actively downloading)
 :ok = YtDlp.cancel(download_id)
+```
+
+### Post-Processing with FFmpeg
+
+Extract audio, generate thumbnails, and more using yt-dlp's built-in ffmpeg integration:
+
+```elixir
+# Extract audio as MP3
+{:ok, audio_path} = YtDlp.PostProcessor.extract_audio(
+  url,
+  format: :mp3,
+  quality: "320K"
+)
+
+# Download best video + audio and merge
+{:ok, result} = YtDlp.PostProcessor.download_and_merge(
+  url,
+  video_format: "bestvideo[height<=1080]",
+  audio_format: "bestaudio",
+  output_format: :mp4
+)
+
+# Extract thumbnail
+{:ok, thumb_path} = YtDlp.PostProcessor.extract_thumbnail(url)
+
+# Download with embedded subtitles
+{:ok, video_path} = YtDlp.PostProcessor.download_with_subtitles(
+  url,
+  langs: ["en", "es"],
+  auto_subs: true
+)
+
+# Use format helpers
+YtDlp.download(url, format: YtDlp.PostProcessor.video_quality(1080))
+YtDlp.download(url, format: YtDlp.PostProcessor.audio_only(:mp3, "192K"))
+```
+
+### Advanced Processing with Membrane
+
+For Elixir-native video processing (requires ffmpeg + optional Membrane deps):
+
+```elixir
+# Generate thumbnail at specific timestamp
+{:ok, thumb} = YtDlp.Membrane.generate_thumbnail(
+  video_path,
+  timestamp: 5.0,
+  width: 1920,
+  height: 1080
+)
+
+# Extract audio track
+{:ok, audio} = YtDlp.Membrane.extract_audio_track(
+  video_path,
+  format: :mp3,
+  bitrate: "320k"
+)
+
+# Create preview clip
+{:ok, preview} = YtDlp.Membrane.create_preview(
+  video_path,
+  start_at: 10.0,
+  duration: 30.0
+)
+
+# Transcode to different format
+{:ok, transcoded} = YtDlp.Membrane.transcode(
+  video_path,
+  output_format: :webm,
+  video_codec: "vp9",
+  resolution: {1280, 720}
+)
+
+# Convenience: Download with auto-generated thumbnail
+{:ok, %{video: video_path, thumbnail: thumb_path}} =
+  YtDlp.Membrane.download_with_thumbnail(url, thumbnail_at: 5.0)
 ```
 
 ### Custom Download Options
