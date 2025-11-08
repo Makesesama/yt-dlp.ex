@@ -32,6 +32,7 @@ defmodule YtDlp.Downloader do
   require Logger
 
   alias YtDlp.Command
+  alias YtDlp.Error
 
   @type download_id :: String.t()
   @type download_status :: :pending | :downloading | :completed | :failed
@@ -40,7 +41,7 @@ defmodule YtDlp.Downloader do
           url: String.t(),
           status: download_status(),
           result: map() | nil,
-          error: String.t() | nil,
+          error: Error.error() | nil,
           progress: map() | nil,
           started_at: DateTime.t() | nil,
           completed_at: DateTime.t() | nil
@@ -63,7 +64,7 @@ defmodule YtDlp.Downloader do
 
     * `:name` - Process name (default: `__MODULE__`)
     * `:max_concurrent` - Maximum concurrent downloads (default: 3)
-    * `:output_dir` - Directory to save downloads (default: "./downloads")
+    * `:output_dir` - Directory to save downloads (default: `System.tmp_dir!/0 <> "/yt_dlp"`)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -89,7 +90,7 @@ defmodule YtDlp.Downloader do
     * `{:error, reason}` - Failed to queue download
   """
   @spec download(GenServer.server(), String.t(), keyword()) ::
-          {:ok, download_id()} | {:error, String.t()}
+          {:ok, download_id()} | {:error, Error.error()}
   def download(server \\ __MODULE__, url, opts \\ []) do
     GenServer.call(server, {:download, url, opts})
   end
@@ -130,7 +131,7 @@ defmodule YtDlp.Downloader do
     * `:ok` - Download cancelled successfully
     * `{:error, reason}` - Failed to cancel
   """
-  @spec cancel(GenServer.server(), download_id()) :: :ok | {:error, String.t()}
+  @spec cancel(GenServer.server(), download_id()) :: :ok | {:error, Error.error()}
   def cancel(server \\ __MODULE__, download_id) do
     GenServer.call(server, {:cancel, download_id})
   end
@@ -144,7 +145,7 @@ defmodule YtDlp.Downloader do
     * `{:error, reason}` - Failed to get info
   """
   @spec get_info(GenServer.server(), String.t(), keyword()) ::
-          {:ok, map()} | {:error, String.t()}
+          {:ok, map()} | {:error, Error.error()}
   def get_info(server \\ __MODULE__, url, opts \\ []) do
     GenServer.call(server, {:get_info, url, opts}, 30_000)
   end
@@ -215,7 +216,16 @@ defmodule YtDlp.Downloader do
       state.downloads
       |> Map.values()
       |> Enum.map(&Map.drop(&1, [:opts, :port_pid]))
-      |> Enum.sort_by(& &1.started_at, {:desc, DateTime})
+      |> Enum.sort_by(
+        fn download ->
+          # Put pending downloads (with nil started_at) last
+          case download.started_at do
+            nil -> {nil, 0}
+            datetime -> {:datetime, datetime}
+          end
+        end,
+        :desc
+      )
 
     {:reply, downloads, state}
   end
@@ -233,11 +243,13 @@ defmodule YtDlp.Downloader do
           {:ok, port_pid} ->
             Command.cancel_download(port_pid)
 
+            error = Error.command_error("Download cancelled by user")
+
             new_state =
               state
               |> update_download(download_id, %{
                 status: :failed,
-                error: "Download cancelled by user",
+                error: error,
                 completed_at: DateTime.utc_now()
               })
               |> Map.update!(:port_pids, &Map.delete(&1, download_id))
@@ -247,14 +259,29 @@ defmodule YtDlp.Downloader do
             {:reply, :ok, new_state}
 
           :error ->
-            {:reply, {:error, "Port PID not found for active download"}, state}
+            {:reply,
+             {:error,
+              Error.not_found_error("Port PID not found for active download",
+                resource: :port_pid,
+                identifier: download_id
+              )}, state}
         end
 
       {:ok, %{status: status}} ->
-        {:reply, {:error, "Download already #{status}"}, state}
+        {:reply,
+         {:error,
+          Error.validation_error("Cannot cancel download",
+            field: :status,
+            value: status
+          )}, state}
 
       :error ->
-        {:reply, {:error, :not_found}, state}
+        {:reply,
+         {:error,
+          Error.not_found_error("Download not found",
+            resource: :download,
+            identifier: download_id
+          )}, state}
     end
   end
 
@@ -336,7 +363,7 @@ defmodule YtDlp.Downloader do
       end
 
     if download_id do
-      Logger.error("Download #{download_id} failed: #{error}")
+      Logger.error("Download #{download_id} failed: #{Exception.message(error)}")
 
       new_state =
         state

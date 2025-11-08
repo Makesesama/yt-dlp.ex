@@ -23,7 +23,7 @@ Add `yt_dlp` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:yt_dlp, "~> 0.1.0"}
+    {:yt_dlp, github: "Makesesama/yt-dlp.ex", branch: "main"}
   ]
 end
 ```

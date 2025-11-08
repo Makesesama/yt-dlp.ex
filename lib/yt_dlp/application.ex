@@ -24,10 +24,12 @@ defmodule YtDlp.Application do
   end
 
   defp downloader_opts do
+    default_output_dir = Path.join(System.tmp_dir!(), "yt_dlp")
+
     [
       name: YtDlp.Downloader,
       max_concurrent: Application.get_env(:yt_dlp, :max_concurrent_downloads, 3),
-      output_dir: Application.get_env(:yt_dlp, :output_dir, "./downloads")
+      output_dir: Application.get_env(:yt_dlp, :output_dir, default_output_dir)
     ]
   end
 end

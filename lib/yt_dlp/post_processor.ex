@@ -112,7 +112,8 @@ defmodule YtDlp.PostProcessor do
         output_format: :mkv
       )
   """
-  @spec download_and_merge(String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  @spec download_and_merge(String.t(), keyword()) ::
+          {:ok, %{path: String.t(), url: String.t()}} | {:error, YtDlp.Error.error()}
   def download_and_merge(url, opts \\ []) do
     video_format = Keyword.get(opts, :video_format, "bestvideo")
     audio_format = Keyword.get(opts, :audio_format, "bestaudio")
@@ -159,9 +160,7 @@ defmodule YtDlp.PostProcessor do
     audio_codec = Keyword.get(opts, :audio_codec)
     output_dir = Keyword.get(opts, :output_dir, Path.dirname(file_path))
 
-    unless File.exists?(file_path) do
-      {:error, "Input file does not exist: #{file_path}"}
-    else
+    if File.exists?(file_path) do
       # Build output path
       basename = Path.basename(file_path, Path.extname(file_path))
       output_path = Path.join(output_dir, "#{basename}.#{to_format}")
@@ -190,17 +189,18 @@ defmodule YtDlp.PostProcessor do
 
       binary = Command.binary_path()
 
-      case System.cmd(binary, args, stderr_to_stdout: true) do
-        {_output, 0} ->
-          if File.exists?(output_path) do
-            {:ok, output_path}
-          else
-            {:error, "Conversion completed but output file not found"}
-          end
-
+      with {_output, 0} <- System.cmd(binary, args, stderr_to_stdout: true),
+           true <- File.exists?(output_path) do
+        {:ok, output_path}
+      else
         {output, exit_code} ->
           {:error, "Conversion failed (exit #{exit_code}): #{output}"}
+
+        false ->
+          {:error, "Conversion completed but output file not found"}
       end
+    else
+      {:error, "Input file does not exist: #{file_path}"}
     end
   end
 
@@ -233,25 +233,20 @@ defmodule YtDlp.PostProcessor do
 
     binary = Command.binary_path()
 
-    case System.cmd(binary, args, stderr_to_stdout: true) do
-      {output, 0} ->
-        # Try to find the thumbnail file
-        title = extract_title_from_output(output)
-
-        if title do
-          thumb_path = Path.join(output_dir, "#{title}.#{format}")
-
-          if File.exists?(thumb_path) do
-            {:ok, thumb_path}
-          else
-            {:error, "Thumbnail file not found"}
-          end
-        else
-          {:error, "Could not determine thumbnail filename"}
-        end
-
+    with {output, 0} <- System.cmd(binary, args, stderr_to_stdout: true),
+         title when not is_nil(title) <- extract_title_from_output(output),
+         thumb_path = Path.join(output_dir, "#{title}.#{format}"),
+         true <- File.exists?(thumb_path) do
+      {:ok, thumb_path}
+    else
       {output, exit_code} ->
         {:error, "Thumbnail extraction failed (exit #{exit_code}): #{output}"}
+
+      nil ->
+        {:error, "Could not determine thumbnail filename"}
+
+      false ->
+        {:error, "Thumbnail file not found"}
     end
   end
 
@@ -327,7 +322,7 @@ defmodule YtDlp.PostProcessor do
       YtDlp.download(url, format: YtDlp.PostProcessor.audio_only(:mp3, "192K"))
   """
   @spec audio_only(audio_format(), quality()) :: String.t()
-  def audio_only(format \\ :mp3, quality \\ "192K") do
+  def audio_only(_format \\ :mp3, quality \\ "192K") do
     "bestaudio/best[abr<=#{quality}]"
   end
 

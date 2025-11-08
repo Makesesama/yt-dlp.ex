@@ -73,9 +73,7 @@ defmodule YtDlp.Membrane do
   """
   @spec generate_thumbnail(String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def generate_thumbnail(video_path, opts \\ []) do
-    unless membrane_available?() do
-      {:error, "Membrane framework not installed. Add {:membrane_core, \"~> 1.0\"} to deps"}
-    else
+    if membrane_available?() do
       timestamp = Keyword.get(opts, :timestamp, 5.0)
       width = Keyword.get(opts, :width, 1280)
       height = Keyword.get(opts, :height, 720)
@@ -91,6 +89,8 @@ defmodule YtDlp.Membrane do
       # Use ffmpeg via System.cmd for thumbnail generation
       # (Membrane is better for streaming, ffmpeg is simpler for single frame)
       ffmpeg_generate_thumbnail(video_path, output_path, timestamp, width, height)
+    else
+      {:error, "Membrane framework not installed. Add {:membrane_core, \"~> 1.0\"} to deps"}
     end
   end
 
@@ -114,9 +114,7 @@ defmodule YtDlp.Membrane do
   """
   @spec extract_audio_track(String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def extract_audio_track(video_path, opts \\ []) do
-    unless membrane_available?() do
-      {:error, "Membrane framework not installed"}
-    else
+    if membrane_available?() do
       format = Keyword.get(opts, :format, :mp3)
       bitrate = Keyword.get(opts, :bitrate, "192k")
 
@@ -129,6 +127,8 @@ defmodule YtDlp.Membrane do
 
       # Use ffmpeg for audio extraction
       ffmpeg_extract_audio(video_path, output_path, format, bitrate)
+    else
+      {:error, "Membrane framework not installed"}
     end
   end
 
@@ -153,9 +153,7 @@ defmodule YtDlp.Membrane do
   """
   @spec create_preview(String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def create_preview(video_path, opts) do
-    unless membrane_available?() do
-      {:error, "Membrane framework not installed"}
-    else
+    if membrane_available?() do
       start_at = Keyword.get(opts, :start_at, 0.0)
       duration = Keyword.fetch!(opts, :duration)
       format = Keyword.get(opts, :format, :mp4)
@@ -168,6 +166,8 @@ defmodule YtDlp.Membrane do
         )
 
       ffmpeg_create_clip(video_path, output_path, start_at, duration)
+    else
+      {:error, "Membrane framework not installed"}
     end
   end
 
@@ -196,9 +196,7 @@ defmodule YtDlp.Membrane do
   """
   @spec transcode(String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def transcode(video_path, opts) do
-    unless membrane_available?() do
-      {:error, "Membrane framework not installed"}
-    else
+    if membrane_available?() do
       output_format = Keyword.fetch!(opts, :output_format)
       video_codec = Keyword.get(opts, :video_codec)
       audio_codec = Keyword.get(opts, :audio_codec)
@@ -222,6 +220,8 @@ defmodule YtDlp.Membrane do
         audio_bitrate,
         resolution
       )
+    else
+      {:error, "Membrane framework not installed"}
     end
   end
 

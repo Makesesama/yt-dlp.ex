@@ -9,6 +9,8 @@ defmodule YtDlp.Port do
   use GenServer
   require Logger
 
+  alias YtDlp.Error
+
   @type progress :: %{
           percent: float() | nil,
           downloaded: String.t() | nil,
@@ -17,7 +19,7 @@ defmodule YtDlp.Port do
           eta: String.t() | nil
         }
 
-  @type port_result :: {:ok, String.t()} | {:error, String.t()}
+  @type port_result :: {:ok, String.t()} | {:error, Error.error()}
 
   defmodule State do
     @moduledoc false
@@ -62,10 +64,12 @@ defmodule YtDlp.Port do
     catch
       :exit, {:timeout, _} ->
         GenServer.stop(pid, :kill)
-        {:error, "Command timed out after #{timeout}ms"}
+
+        {:error,
+         Error.timeout_error("Command timed out", timeout: timeout, operation: :yt_dlp_command)}
 
       :exit, reason ->
-        {:error, "Process exited: #{inspect(reason)}"}
+        {:error, Error.command_error("Process exited unexpectedly", output: inspect(reason))}
     end
   end
 
@@ -91,7 +95,7 @@ defmodule YtDlp.Port do
         :exit_status,
         :use_stdio,
         :stderr_to_stdout,
-        {:line, 10000}
+        {:line, 10_000}
       ])
 
     state = %State{
@@ -112,34 +116,17 @@ defmodule YtDlp.Port do
 
   @impl true
   def handle_info({port, {:data, {:eol, line}}}, %State{port: port} = state) do
-    line_str = IO.chardata_to_string(line)
-
-    # Parse progress if this is a progress line
-    new_state =
-      if String.contains?(line_str, "[download]") do
-        case parse_progress(line_str) do
-          {:ok, progress} ->
-            # Call progress callback if provided
-            if state.progress_callback do
-              try do
-                state.progress_callback.(progress)
-              rescue
-                error ->
-                  Logger.error("Progress callback error: #{inspect(error)}")
-              end
-            end
-
-            %{state | last_progress: progress, stderr_lines: [line_str | state.stderr_lines]}
-
-          :error ->
-            %{state | stderr_lines: [line_str | state.stderr_lines]}
-        end
-      else
-        # Regular output line
-        %{state | stdout_lines: [line_str | state.stdout_lines]}
-      end
-
+    # Complete line received - combine with buffer and process
+    complete_line = state.buffer <> IO.chardata_to_string(line)
+    new_state = process_line(complete_line, %{state | buffer: ""})
     {:noreply, new_state}
+  end
+
+  @impl true
+  def handle_info({port, {:data, {:noeol, line}}}, %State{port: port} = state) do
+    # Partial line - add to buffer
+    partial = IO.chardata_to_string(line)
+    {:noreply, %{state | buffer: state.buffer <> partial}}
   end
 
   @impl true
@@ -163,7 +150,8 @@ defmodule YtDlp.Port do
         if exit_code == 0 do
           {:ok, output}
         else
-          {:error, "Command failed with exit code #{exit_code}: #{String.trim(output)}"}
+          error = classify_error(output, exit_code, state.args)
+          {:error, error}
         end
 
       GenServer.reply(state.caller, reply)
@@ -177,10 +165,38 @@ defmodule YtDlp.Port do
     Logger.warning("Port process exited: #{inspect(reason)}")
 
     if state.caller do
-      GenServer.reply(state.caller, {:error, "Port process died: #{inspect(reason)}"})
+      error = Error.command_error("Port process died unexpectedly", output: inspect(reason))
+      GenServer.reply(state.caller, {:error, error})
     end
 
     {:stop, :normal, state}
+  end
+
+  # Process a complete line
+  defp process_line(line_str, state) do
+    # Parse progress if this is a progress line
+    if String.contains?(line_str, "[download]") do
+      case parse_progress(line_str) do
+        {:ok, progress} ->
+          invoke_progress_callback(state.progress_callback, progress)
+          %{state | last_progress: progress, stderr_lines: [line_str | state.stderr_lines]}
+
+        :error ->
+          %{state | stderr_lines: [line_str | state.stderr_lines]}
+      end
+    else
+      # Regular output line
+      %{state | stdout_lines: [line_str | state.stdout_lines]}
+    end
+  end
+
+  defp invoke_progress_callback(nil, _progress), do: :ok
+
+  defp invoke_progress_callback(callback, progress) when is_function(callback) do
+    callback.(progress)
+  rescue
+    error ->
+      Logger.error("Progress callback error: #{inspect(error)}")
   end
 
   @impl true
@@ -218,17 +234,22 @@ defmodule YtDlp.Port do
   end
 
   defp parse_progress_line(line) do
-    # Parse: "[download]  45.2% of 10.5MiB at  1.2MiB/s ETA 00:05"
-    regex =
-      ~r/\[download\]\s+([\d.]+)%(?:\s+of\s+([\d.]+\w+))?(?:\s+at\s+([\d.]+\w+\/s))?(?:\s+ETA\s+([\d:]+))?/
+    # Parse various formats:
+    # "[download]  45.2% of 10.5MiB at  1.2MiB/s ETA 00:05"
+    # "[download]   0.9% of ~  30.88MiB at    5.34KiB/s ETA Unknown (frag 0/124)"
+    # Remove the (frag X/Y) part if present
+    cleaned_line = String.replace(line, ~r/\(frag \d+\/\d+\)/, "")
 
-    case Regex.run(regex, line) do
+    regex =
+      ~r/\[download\]\s+([\d.]+)%(?:\s+of\s+~?\s*([\d.]+\w+))?(?:\s+at\s+([\d.]+\w+\/s))?(?:\s+ETA\s+([\d:]+|Unknown))?/
+
+    case Regex.run(regex, cleaned_line) do
       [_full, percent | rest] ->
         [total_size, speed, eta] =
           case rest do
-            [ts, sp, et] -> [ts, sp, et]
-            [ts, sp] -> [ts, sp, nil]
-            [ts] -> [ts, nil, nil]
+            [ts, sp, et] -> [clean_value(ts), clean_value(sp), clean_eta(et)]
+            [ts, sp] -> [clean_value(ts), clean_value(sp), nil]
+            [ts] -> [clean_value(ts), nil, nil]
             [] -> [nil, nil, nil]
           end
 
@@ -246,6 +267,20 @@ defmodule YtDlp.Port do
         :error
     end
   end
+
+  @spec clean_value(String.t() | nil) :: String.t() | nil
+  defp clean_value(val) when is_binary(val), do: String.trim(val)
+  defp clean_value(_), do: nil
+
+  @spec clean_eta(String.t() | nil) :: String.t() | nil
+  defp clean_eta(eta) when is_binary(eta) do
+    case eta do
+      "Unknown" -> nil
+      _ -> String.trim(eta)
+    end
+  end
+
+  defp clean_eta(_), do: nil
 
   defp parse_float(str) do
     case Float.parse(str) do
@@ -282,5 +317,91 @@ defmodule YtDlp.Port do
 
   defp format_size(size, unit) do
     "#{Float.round(size, 2)}#{unit}"
+  end
+
+  # Classify yt-dlp errors into structured error types
+  defp classify_error(output, exit_code, args) do
+    output_lower = String.downcase(output)
+    command = "yt-dlp " <> Enum.join(args, " ")
+
+    cond do
+      network_error?(output_lower) ->
+        build_network_error(output, args)
+
+      not_found_error?(output_lower) ->
+        build_not_found_error(args)
+
+      timeout_error?(output_lower) ->
+        Error.timeout_error("Download timed out", operation: :download)
+
+      validation_error?(output_lower) ->
+        Error.validation_error("Invalid yt-dlp options", value: args)
+
+      dependency_error?(output_lower) ->
+        build_dependency_error()
+
+      true ->
+        Error.command_error("yt-dlp command failed",
+          exit_code: exit_code,
+          output: String.trim(output),
+          command: command
+        )
+    end
+  end
+
+  defp network_error?(output_lower) do
+    String.contains?(output_lower, "unable to download") or
+      String.contains?(output_lower, "http error") or
+      String.contains?(output_lower, "urlopen error") or
+      String.contains?(output_lower, "connection") or
+      String.contains?(output_lower, "network")
+  end
+
+  defp not_found_error?(output_lower) do
+    String.contains?(output_lower, "video unavailable") or
+      String.contains?(output_lower, "not found") or
+      String.contains?(output_lower, "no video formats") or
+      String.contains?(output_lower, "this video is unavailable")
+  end
+
+  defp timeout_error?(output_lower) do
+    String.contains?(output_lower, "timed out") or
+      String.contains?(output_lower, "timeout")
+  end
+
+  defp validation_error?(output_lower) do
+    String.contains?(output_lower, "unrecognized") or
+      String.contains?(output_lower, "invalid") or
+      String.contains?(output_lower, "usage:")
+  end
+
+  defp dependency_error?(output_lower) do
+    String.contains?(output_lower, "ffmpeg") and
+      String.contains?(output_lower, "not found")
+  end
+
+  defp build_network_error(output, args) do
+    url = Enum.find(args, &String.starts_with?(&1, "http"))
+
+    Error.network_error("Network error during download",
+      url: url,
+      reason: String.trim(output)
+    )
+  end
+
+  defp build_not_found_error(args) do
+    url = Enum.find(args, &String.starts_with?(&1, "http"))
+
+    Error.not_found_error("Video not found or unavailable",
+      resource: :video,
+      identifier: url
+    )
+  end
+
+  defp build_dependency_error do
+    Error.dependency_error("FFmpeg is required for this operation",
+      dependency: "ffmpeg",
+      required_for: "post-processing"
+    )
   end
 end

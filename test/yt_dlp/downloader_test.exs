@@ -60,8 +60,8 @@ defmodule YtDlp.DownloaderTest do
   describe "cancel/2" do
     test "cancels a pending download", %{downloader: downloader} do
       # Queue multiple downloads to ensure some stay pending
-      {:ok, id1} = Downloader.download(downloader, "https://example.com/video1")
-      {:ok, id2} = Downloader.download(downloader, "https://example.com/video2")
+      {:ok, _id1} = Downloader.download(downloader, "https://example.com/video1")
+      {:ok, _id2} = Downloader.download(downloader, "https://example.com/video2")
       {:ok, id3} = Downloader.download(downloader, "https://example.com/video3")
 
       # Try to cancel - at least one should be pending
@@ -77,7 +77,8 @@ defmodule YtDlp.DownloaderTest do
     end
 
     test "returns error for non-existent download", %{downloader: downloader} do
-      assert {:error, :not_found} = Downloader.cancel(downloader, "non-existent")
+      assert {:error, %YtDlp.Error.NotFoundError{}} =
+               Downloader.cancel(downloader, "non-existent")
     end
   end
 

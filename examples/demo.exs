@@ -4,6 +4,61 @@
 # Run with: mix run examples/demo.exs
 # Or: elixir -S mix run examples/demo.exs
 
+# Helper functions
+defmodule DemoHelpers do
+  def monitor_download(download_id) do
+    {:ok, status} = YtDlp.get_status(download_id)
+
+    case status.status do
+      :completed ->
+        IO.puts("\n   ✓ Download complete!")
+        IO.puts("     File: #{status.result.path}")
+
+      :failed ->
+        IO.puts("\n   ✗ Download failed: #{status.error}")
+
+      _ ->
+        Process.sleep(1000)
+        monitor_download(download_id)
+    end
+  end
+
+  def wait_for_download_sync(download_id, max_wait \\ 60_000) do
+    wait_for_download_sync(download_id, max_wait, 0)
+  end
+
+  defp wait_for_download_sync(_download_id, max_wait, elapsed) when elapsed >= max_wait do
+    {:error, "Timeout waiting for download"}
+  end
+
+  defp wait_for_download_sync(download_id, max_wait, elapsed) do
+    {:ok, status} = YtDlp.get_status(download_id)
+
+    case status.status do
+      :completed ->
+        {:ok, status.result.path}
+
+      :failed ->
+        {:error, status.error}
+
+      _ ->
+        Process.sleep(1000)
+        wait_for_download_sync(download_id, max_wait, elapsed + 1000)
+    end
+  end
+
+  def format_bytes(bytes) do
+    cond do
+      bytes >= 1_073_741_824 -> "#{Float.round(bytes / 1_073_741_824, 2)} GB"
+      bytes >= 1_048_576 -> "#{Float.round(bytes / 1_048_576, 2)} MB"
+      bytes >= 1024 -> "#{Float.round(bytes / 1024, 2)} KB"
+      true -> "#{bytes} bytes"
+    end
+  end
+end
+
+alias DemoHelpers, as: H
+
 IO.puts("=== YtDlp.ex Demo ===\n")
 
 # Start the application
@@ -72,16 +127,14 @@ IO.puts("4. Download with real-time progress...")
       speed = progress.speed || "N/A"
       eta = progress.eta || "N/A"
 
-      IO.write(
-        "\r   Progress: #{Float.round(percent, 1)}% | Speed: #{speed} | ETA: #{eta}    "
-      )
+      IO.write("\r   Progress: #{Float.round(percent, 1)}% | Speed: #{speed} | ETA: #{eta}    ")
     end
   )
 
 IO.puts("   Download ID: #{download_id}")
 
 # Monitor until complete
-monitor_download(download_id)
+H.monitor_download(download_id)
 
 IO.puts("")
 
@@ -96,7 +149,7 @@ case YtDlp.download_sync(test_url, max_wait: 60_000) do
 
     if File.exists?(result.path) do
       stat = File.stat!(result.path)
-      IO.puts("     File size: #{format_bytes(stat.size)}")
+      IO.puts("     File size: #{H.format_bytes(stat.size)}")
     end
 
   {:error, reason} ->
@@ -173,7 +226,9 @@ Enum.each(downloads, fn download ->
       ""
     end
 
-  IO.puts("   #{status_icon} #{download.status}#{progress_str} - #{String.slice(download.url, 0..50)}...")
+  IO.puts(
+    "   #{status_icon} #{download.status}#{progress_str} - #{String.slice(download.url, 0..50)}..."
+  )
 end)
 
 IO.puts("")
@@ -192,7 +247,7 @@ IO.puts("9. Custom download with specific format...")
 IO.puts("   Queued audio-only download: #{download_id}")
 
 # Wait for it
-result = wait_for_download_sync(download_id)
+result = H.wait_for_download_sync(download_id)
 
 case result do
   {:ok, path} ->
@@ -227,7 +282,7 @@ end
     end
   )
 
-case wait_for_download_sync(download_id, 120_000) do
+case H.wait_for_download_sync(download_id, 120_000) do
   {:ok, file_path} ->
     IO.puts("   ✓ Download complete: #{file_path}")
 
@@ -250,51 +305,3 @@ end
 
 IO.puts("")
 IO.puts("=== Demo Complete ===")
-
-# Helper functions
-
-defp monitor_download(download_id) do
-  {:ok, status} = YtDlp.get_status(download_id)
-
-  case status.status do
-    :completed ->
-      IO.puts("\n   ✓ Download complete!")
-      IO.puts("     File: #{status.result.path}")
-
-    :failed ->
-      IO.puts("\n   ✗ Download failed: #{status.error}")
-
-    _ ->
-      Process.sleep(1000)
-      monitor_download(download_id)
-  end
-end
-
-defp wait_for_download_sync(download_id, max_wait \\ 60_000) do
-  wait_for_download_sync(download_id, max_wait, 0)
-end
-
-defp wait_for_download_sync(download_id, max_wait, elapsed) when elapsed >= max_wait do
-  {:error, "Timeout waiting for download"}
-end
-
-defp wait_for_download_sync(download_id, max_wait, elapsed) do
-  {:ok, status} = YtDlp.get_status(download_id)
-
-  case status.status do
-    :completed -> {:ok, status.result.path}
-    :failed -> {:error, status.error}
-    _ ->
-      Process.sleep(1000)
-      wait_for_download_sync(download_id, max_wait, elapsed + 1000)
-  end
-end
-
-defp format_bytes(bytes) do
-  cond do
-    bytes >= 1_073_741_824 -> "#{Float.round(bytes / 1_073_741_824, 2)} GB"
-    bytes >= 1_048_576 -> "#{Float.round(bytes / 1_048_576, 2)} MB"
-    bytes >= 1024 -> "#{Float.round(bytes / 1024, 2)} KB"
-    true -> "#{bytes} bytes"
-  end
-end

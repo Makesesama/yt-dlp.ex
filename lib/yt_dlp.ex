@@ -20,7 +20,7 @@ defmodule YtDlp do
 
       config :yt_dlp,
         max_concurrent_downloads: 3,
-        output_dir: "./downloads"
+        output_dir: "/custom/path"  # Default: System.tmp_dir!() <> "/yt_dlp"
 
   ## Usage
 
@@ -65,6 +65,7 @@ defmodule YtDlp do
   """
 
   alias YtDlp.Downloader
+  alias YtDlp.Error
 
   @type download_id :: String.t()
   @type download_result :: %{path: String.t(), url: String.t()}
@@ -107,13 +108,13 @@ defmodule YtDlp do
       {:ok, download_id} = YtDlp.download(
         "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         progress_callback: fn progress ->
-          IO.write("\\r#{progress.percent}% - #{progress.speed} - ETA: #{progress.eta}")
+          IO.write("\\r\#{progress.percent}% - \#{progress.speed} - ETA: \#{progress.eta}")
         end
       )
   """
-  @spec download(String.t(), keyword()) :: {:ok, download_id()} | {:error, String.t()}
+  @spec download(String.t(), keyword()) :: {:ok, download_id()} | {:error, Error.error()}
   def download(url, opts \\ []) do
-    Downloader.download(url, opts)
+    Downloader.download(Downloader, url, opts)
   end
 
   @doc """
@@ -139,7 +140,7 @@ defmodule YtDlp do
       {:ok, %{path: path}} = YtDlp.download_sync("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
       IO.puts("Downloaded to: \#{path}")
   """
-  @spec download_sync(String.t(), keyword()) :: {:ok, download_result()} | {:error, String.t()}
+  @spec download_sync(String.t(), keyword()) :: {:ok, download_result()} | {:error, Error.error()}
   def download_sync(url, opts \\ []) do
     poll_interval = Keyword.get(opts, :poll_interval, 1000)
     max_wait = Keyword.get(opts, :max_wait, 3_600_000)
@@ -170,7 +171,7 @@ defmodule YtDlp do
   """
   @spec get_status(download_id()) :: {:ok, download_info()} | {:error, :not_found}
   def get_status(download_id) do
-    Downloader.get_status(download_id)
+    Downloader.get_status(Downloader, download_id)
   end
 
   @doc """
@@ -187,7 +188,7 @@ defmodule YtDlp do
   """
   @spec list_downloads() :: [download_info()]
   def list_downloads do
-    Downloader.list_downloads()
+    Downloader.list_downloads(Downloader)
   end
 
   @doc """
@@ -209,9 +210,9 @@ defmodule YtDlp do
       {:ok, download_id} = YtDlp.download("https://example.com/video")
       :ok = YtDlp.cancel(download_id)
   """
-  @spec cancel(download_id()) :: :ok | {:error, String.t()}
+  @spec cancel(download_id()) :: :ok | {:error, Error.error()}
   def cancel(download_id) do
-    Downloader.cancel(download_id)
+    Downloader.cancel(Downloader, download_id)
   end
 
   @doc """
@@ -236,9 +237,9 @@ defmodule YtDlp do
       IO.puts("Duration: \#{info["duration"]} seconds")
       IO.puts("Uploader: \#{info["uploader"]}")
   """
-  @spec get_info(String.t(), keyword()) :: {:ok, map()} | {:error, String.t()}
+  @spec get_info(String.t(), keyword()) :: {:ok, map()} | {:error, Error.error()}
   def get_info(url, opts \\ []) do
-    Downloader.get_info(url, opts)
+    Downloader.get_info(Downloader, url, opts)
   end
 
   @doc """
@@ -256,7 +257,7 @@ defmodule YtDlp do
         {:error, reason} -> IO.puts("yt-dlp not found: \#{reason}")
       end
   """
-  @spec check_installation() :: {:ok, String.t()} | {:error, String.t()}
+  @spec check_installation() :: {:ok, String.t()} | {:error, Error.error()}
   def check_installation do
     case YtDlp.Command.run(["--version"]) do
       {:ok, version} -> {:ok, String.trim(version)}
@@ -268,7 +269,11 @@ defmodule YtDlp do
 
   defp wait_for_completion(download_id, poll_interval, max_wait, elapsed \\ 0) do
     if elapsed >= max_wait do
-      {:error, "Download timed out after #{max_wait}ms"}
+      {:error,
+       Error.timeout_error("Download timed out",
+         timeout: max_wait,
+         operation: :download_sync
+       )}
     else
       case get_status(download_id) do
         {:ok, %{status: :completed, result: result}} ->
@@ -281,8 +286,12 @@ defmodule YtDlp do
           Process.sleep(poll_interval)
           wait_for_completion(download_id, poll_interval, max_wait, elapsed + poll_interval)
 
-        {:error, reason} ->
-          {:error, reason}
+        {:error, :not_found} ->
+          {:error,
+           Error.not_found_error("Download not found",
+             resource: :download,
+             identifier: download_id
+           )}
       end
     end
   end
