@@ -8,6 +8,11 @@ An Elixir wrapper for [yt-dlp](https://github.com/yt-dlp/yt-dlp) with GenServer-
 - 🔄 **Concurrent Management**: Control multiple simultaneous downloads
 - 📊 **Real-Time Progress Tracking**: Streaming progress updates via Elixir Ports (%, speed, ETA)
 - ✅ **Cancellation Support**: Cancel active downloads mid-download
+- 🌐 **Proxy Support**: Automatic proxy rotation with health tracking
+  - Multiple rotation strategies (round-robin, random, least-used, healthiest)
+  - Per-proxy timeout configuration
+  - Automatic failover on proxy failures
+  - Support for HTTP/HTTPS/SOCKS proxies
 - 🎬 **FFmpeg Integration**: Extract audio, merge streams, generate thumbnails, embed subtitles
 - 🎞️ **Membrane Support**: Advanced video processing with Elixir Membrane framework (optional)
 - 🎯 **Simple API**: Clean, idiomatic Elixir interface
@@ -246,6 +251,132 @@ case YtDlp.check_installation() do
 end
 ```
 
+### Using Proxies
+
+#### Basic Proxy Usage
+
+```elixir
+# Download with a specific proxy
+{:ok, download_id} = YtDlp.download(
+  "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  proxy: "http://proxy.example.com:8080"
+)
+```
+
+#### Proxy Manager with Automatic Rotation
+
+```elixir
+# Configure proxy list in config/config.exs
+config :yt_dlp,
+  proxies: [
+    "http://proxy1.example.com:8080",
+    "http://proxy2.example.com:8080",
+    "socks5://proxy3.example.com:1080"
+  ],
+  proxy_rotation_strategy: :round_robin,  # or :random, :least_used, :healthiest
+  proxy_failure_threshold: 3,
+  proxy_default_timeout: 30_000
+
+# Use proxy manager for automatic rotation
+{:ok, download_id} = YtDlp.download(
+  "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  use_proxy_manager: true
+)
+```
+
+#### Per-Proxy Timeout Configuration
+
+```elixir
+config :yt_dlp,
+  proxies: [
+    %{url: "http://fast-proxy.example.com:8080", timeout: 10_000},
+    %{url: "http://slow-proxy.example.com:8080", timeout: 60_000},
+    "http://default-proxy.example.com:8080"  # Uses proxy_default_timeout
+  ]
+```
+
+#### Proxy Health Tracking
+
+```elixir
+# Get proxy statistics
+stats = YtDlp.ProxyManager.get_stats()
+
+Enum.each(stats, fn proxy ->
+  total = proxy.success_count + proxy.failure_count
+  success_rate = if total > 0, do: proxy.success_count / total * 100, else: 0
+
+  IO.puts("""
+  #{proxy.url}:
+    Success Rate: #{success_rate}%
+    Enabled: #{proxy.enabled}
+  """)
+end)
+
+# Manually enable/disable proxies
+YtDlp.ProxyManager.disable_proxy("http://bad-proxy.example.com:8080")
+YtDlp.ProxyManager.enable_proxy("http://fixed-proxy.example.com:8080")
+
+# Reset statistics
+YtDlp.ProxyManager.reset_stats()
+```
+
+#### Rotation Strategies
+
+- **`:round_robin`** - Cycles through proxies in order (default)
+- **`:random`** - Randomly selects from available proxies
+- **`:least_used`** - Prefers proxies that haven't been used recently
+- **`:healthiest`** - Prefers proxies with the best success rate
+
+```elixir
+# Change strategy at runtime
+YtDlp.ProxyManager.set_strategy(:healthiest)
+```
+
+### Custom Proxy Backends
+
+The library supports pluggable proxy management backends. Implement the `YtDlp.ProxyBackend` behaviour to integrate with your own systems (database, Redis, external APIs, etc.):
+
+```elixir
+defmodule MyApp.CustomProxyBackend do
+  @behaviour YtDlp.ProxyBackend
+
+  @impl true
+  def get_proxy(opts) do
+    # Your logic: query database, call API, etc.
+    {:ok, %{url: "http://proxy.example.com:8080", timeout: 30_000}}
+  end
+
+  @impl true
+  def report_success(proxy_url, opts) do
+    # Update your system
+    MyApp.ProxyStats.increment_success(proxy_url)
+    :ok
+  end
+
+  @impl true
+  def report_failure(proxy_url, opts) do
+    # Update your system
+    MyApp.ProxyStats.increment_failure(proxy_url)
+    :ok
+  end
+end
+
+# Configure your backend
+config :yt_dlp,
+  proxy_backend: MyApp.CustomProxyBackend,
+  proxy_backend_opts: [
+    pool_name: :main,
+    failure_threshold: 3
+  ]
+```
+
+See `examples/custom_proxy_backend.exs` for complete examples including:
+- Database-backed (Ecto)
+- Redis-backed (distributed)
+- External API integration
+- ETS-cached hybrid approach
+- Multi-region selection
+
 ## Configuration
 
 Configure the application in `config/config.exs`:
@@ -256,7 +387,17 @@ config :yt_dlp,
   max_concurrent_downloads: 3,
 
   # Default output directory for downloads
-  output_dir: "./downloads"
+  output_dir: "./downloads",
+
+  # Proxy configuration
+  proxies: [
+    "http://proxy1.example.com:8080",
+    "http://proxy2.example.com:8080",
+    %{url: "socks5://proxy3.example.com:1080", timeout: 60_000}
+  ],
+  proxy_rotation_strategy: :round_robin,
+  proxy_failure_threshold: 3,
+  proxy_default_timeout: 30_000
 ```
 
 You can also set the yt-dlp binary path via environment variable:
@@ -272,6 +413,13 @@ The library uses Elixir's OTP principles with Port-based communication for relia
 ```
 YtDlp.Application (Supervisor)
     │
+    ├─→ YtDlp.ProxyManager (GenServer)
+    │       │
+    │       ├─→ Manages proxy pool
+    │       ├─→ Tracks proxy health & statistics
+    │       ├─→ Handles rotation strategies
+    │       └─→ Reports success/failure rates
+    │
     └─→ YtDlp.Downloader (GenServer)
             │
             ├─→ Manages download queue
@@ -281,6 +429,8 @@ YtDlp.Application (Supervisor)
                     │
                     └─→ YtDlp.Command (yt-dlp wrapper)
                             │
+                            ├─→ Gets proxy from ProxyManager
+                            ├─→ Reports proxy success/failure
                             └─→ YtDlp.Port (GenServer)
                                     │
                                     └─→ Port (yt-dlp process)
@@ -293,8 +443,9 @@ YtDlp.Application (Supervisor)
 
 - **YtDlp**: Public API module - Main interface for users
 - **YtDlp.Application**: OTP Application with supervision tree
+- **YtDlp.ProxyManager**: GenServer managing proxy pool, rotation, and health tracking
 - **YtDlp.Downloader**: GenServer managing download lifecycle, concurrency, and progress
-- **YtDlp.Command**: Low-level module for executing yt-dlp commands
+- **YtDlp.Command**: Low-level module for executing yt-dlp commands with proxy support
 - **YtDlp.Port**: GenServer for Port communication with streaming output parsing
 
 ### File Path for Waffle/S3 Integration

@@ -8,6 +8,7 @@ defmodule YtDlp.Command do
 
   require Logger
   alias YtDlp.Error
+  alias YtDlp.Proxy
 
   @type command_result :: {:ok, map()} | {:error, Error.error()}
 
@@ -30,6 +31,8 @@ defmodule YtDlp.Command do
     * `args` - List of command-line arguments to pass to yt-dlp
     * `opts` - Keyword list of options (default: [])
       * `:timeout` - Command timeout in milliseconds (default: 300_000 - 5 minutes)
+      * `:proxy` - Proxy URL to use (e.g., "http://proxy.example.com:8080")
+      * `:use_proxy_manager` - Use ProxyManager for automatic proxy rotation (default: false)
 
   ## Returns
 
@@ -45,57 +48,29 @@ defmodule YtDlp.Command do
       # Get help text
       YtDlp.Command.run(["--help"])
       # => {:ok, "Usage: yt-dlp [OPTIONS] URL [URL...]\\n..."}
+
+      # With specific proxy
+      YtDlp.Command.run(["--version"], proxy: "http://proxy.example.com:8080")
+
+      # With automatic proxy rotation
+      YtDlp.Command.run(["--version"], use_proxy_manager: true)
   """
   @spec run([String.t()], keyword()) :: {:ok, String.t()} | {:error, Error.error()}
   def run(args, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 300_000)
+    use_proxy_manager = Keyword.get(opts, :use_proxy_manager, false)
+    proxy_opt = Keyword.get(opts, :proxy)
+
+    {args_with_proxy, proxy_info} = add_proxy_args(args, proxy_opt, use_proxy_manager)
     binary = binary_path()
 
-    Logger.debug("Running yt-dlp command: #{binary} #{Enum.join(args, " ")}")
+    Logger.debug("Running yt-dlp command: #{binary} #{Enum.join(args_with_proxy, " ")}")
 
-    task =
-      Task.async(fn ->
-        try do
-          System.cmd(binary, args, stderr_to_stdout: true)
-        catch
-          kind, reason ->
-            {:error, {kind, reason}}
-        end
-      end)
+    effective_timeout = get_effective_timeout(proxy_info, timeout)
+    result = execute_command(binary, args_with_proxy, effective_timeout)
 
-    try do
-      case Task.await(task, timeout) do
-        {:error, {_kind, :enoent}} ->
-          {:error,
-           Error.dependency_error("yt-dlp binary not found",
-             dependency: "yt-dlp",
-             required_for: "video downloads"
-           )}
-
-        {:error, {kind, reason}} ->
-          {:error,
-           Error.command_error("Binary not accessible",
-             output: "#{inspect(kind)} - #{inspect(reason)}"
-           )}
-
-        {output, 0} ->
-          {:ok, output}
-
-        {output, exit_code} ->
-          Logger.error("yt-dlp command failed (exit code #{exit_code}): #{output}")
-          error = classify_command_error(output, exit_code, args)
-          {:error, error}
-      end
-    catch
-      :exit, {:timeout, _} ->
-        Task.shutdown(task, :brutal_kill)
-
-        {:error,
-         Error.timeout_error("Command timed out",
-           timeout: timeout,
-           operation: :yt_dlp_command
-         )}
-    end
+    report_proxy_result(proxy_info, result)
+    result
   end
 
   @doc """
@@ -453,5 +428,103 @@ defmodule YtDlp.Command do
       dependency: "ffmpeg",
       required_for: "post-processing"
     )
+  end
+
+  # Adds proxy arguments to the command args list
+  defp add_proxy_args(args, proxy_opt, use_proxy_manager) do
+    cond do
+      # Explicit proxy provided
+      proxy_opt ->
+        {["--proxy", proxy_opt | args], nil}
+
+      # Use proxy manager
+      use_proxy_manager ->
+        case Proxy.get_proxy() do
+          {:ok, proxy} ->
+            Logger.debug("Using proxy from backend: #{proxy.url}")
+            {["--proxy", proxy.url | args], proxy}
+
+          {:error, :no_proxies} ->
+            Logger.warning("Proxy backend has no available proxies, continuing without proxy")
+            {args, nil}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Failed to get proxy from backend: #{inspect(reason)}, continuing without proxy"
+            )
+
+            {args, nil}
+        end
+
+      # No proxy
+      true ->
+        {args, nil}
+    end
+  end
+
+  defp get_effective_timeout(proxy_info, default_timeout) do
+    case proxy_info do
+      %{timeout: proxy_timeout} -> proxy_timeout
+      _ -> default_timeout
+    end
+  end
+
+  defp execute_command(binary, args, timeout) do
+    task =
+      Task.async(fn ->
+        try do
+          System.cmd(binary, args, stderr_to_stdout: true)
+        catch
+          kind, reason ->
+            {:error, {kind, reason}}
+        end
+      end)
+
+    try do
+      handle_task_result(Task.await(task, timeout), args)
+    catch
+      :exit, {:timeout, _} ->
+        Task.shutdown(task, :brutal_kill)
+
+        {:error,
+         Error.timeout_error("Command timed out",
+           timeout: timeout,
+           operation: :yt_dlp_command
+         )}
+    end
+  end
+
+  defp handle_task_result(task_result, args) do
+    case task_result do
+      {:error, {_kind, :enoent}} ->
+        {:error,
+         Error.dependency_error("yt-dlp binary not found",
+           dependency: "yt-dlp",
+           required_for: "video downloads"
+         )}
+
+      {:error, {kind, reason}} ->
+        {:error,
+         Error.command_error("Binary not accessible",
+           output: "#{inspect(kind)} - #{inspect(reason)}"
+         )}
+
+      {output, 0} ->
+        {:ok, output}
+
+      {output, exit_code} ->
+        Logger.error("yt-dlp command failed (exit code #{exit_code}): #{output}")
+        error = classify_command_error(output, exit_code, args)
+        {:error, error}
+    end
+  end
+
+  defp report_proxy_result(nil, _result), do: :ok
+
+  defp report_proxy_result(proxy_info, result) do
+    case result do
+      {:ok, _} -> Proxy.report_success(proxy_info.url)
+      {:error, _} -> Proxy.report_failure(proxy_info.url)
+    end
   end
 end

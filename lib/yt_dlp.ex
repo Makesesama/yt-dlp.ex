@@ -86,6 +86,8 @@ defmodule YtDlp do
       * `:filename_template` - Output filename template
       * `:timeout` - Download timeout in milliseconds
       * `:progress_callback` - Function called with progress updates
+      * `:proxy` - Proxy URL to use (e.g., "http://proxy.example.com:8080")
+      * `:use_proxy_manager` - Use ProxyManager for automatic proxy rotation (default: false)
 
   ## Returns
 
@@ -110,6 +112,18 @@ defmodule YtDlp do
         progress_callback: fn progress ->
           IO.write("\\r\#{progress.percent}% - \#{progress.speed} - ETA: \#{progress.eta}")
         end
+      )
+
+      # With specific proxy
+      {:ok, download_id} = YtDlp.download(
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        proxy: "http://proxy.example.com:8080"
+      )
+
+      # With automatic proxy rotation
+      {:ok, download_id} = YtDlp.download(
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        use_proxy_manager: true
       )
   """
   @spec download(String.t(), keyword()) :: {:ok, download_id()} | {:error, Error.error()}
